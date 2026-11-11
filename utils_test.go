@@ -8,12 +8,15 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
 )
 
 var testUntarFns = map[string]func(string, io.Reader) error{
 	"untar": func(dest string, r io.Reader) error {
-		return Untar(r, dest, nil)
+		return Untar(r, dest, &TarOptions{
+			NoLchown: true,
+		})
 	},
 	"applylayer": func(dest string, r io.Reader) error {
 		_, err := ApplyLayer(dest, r)
@@ -64,11 +67,21 @@ func testBreakout(untarFn string, tmpdir string, headers []*tar.Header) error {
 
 	reader, writer := io.Pipe()
 	go func() {
-		t := tar.NewWriter(writer)
-		for _, hdr := range headers {
-			_ = t.WriteHeader(hdr)
+		tw := tar.NewWriter(writer)
+		var uid, gid int
+		if runtime.GOOS != "windows" {
+			uid, gid = os.Getuid(), os.Getgid()
 		}
-		_ = t.Close()
+		for _, hdr := range headers {
+			// Use the current user to avoid unrelated EPERM failures from applying
+			// archive ownership. ApplyLayer always applies archive ownership and
+			// does not support TarOptions.NoLchown.
+			hdr := *hdr
+			hdr.Uid = uid
+			hdr.Gid = gid
+			_ = tw.WriteHeader(&hdr)
+		}
+		_ = tw.Close()
 	}()
 
 	untar := testUntarFns[untarFn]
@@ -76,7 +89,8 @@ func testBreakout(untarFn string, tmpdir string, headers []*tar.Header) error {
 		return fmt.Errorf("could not find untar function %q in testUntarFns", untarFn)
 	}
 	if err := untar(dest, reader); err != nil {
-		if !errors.As(err, new(breakoutError)) {
+		var boErr *breakoutErr
+		if !errors.As(err, &boErr) && !isPathEscapes(err) {
 			// If untar returns an error unrelated to an archive breakout,
 			// then consider this an unexpected error and abort.
 			return err
@@ -140,6 +154,12 @@ func testBreakout(untarFn string, tmpdir string, headers []*tar.Header) error {
 	// Since victim/hello was generated with time.Now(), it is safe to assume
 	// that any file whose content matches exactly victim/hello, managed somehow
 	// to access victim/hello.
+	//
+	// Symlinks are intentionally skipped: the extraction root's security model
+	// allows extracting symlinks with targets outside the root (since the node
+	// itself is inside the root), and subsequent access through root-bounded
+	// operations will catch any attempted escape. A symlink whose target
+	// resolves outside root does not constitute a breakout on its own.
 	return filepath.WalkDir(dest, func(path string, info os.DirEntry, err error) error {
 		if info.IsDir() {
 			if err != nil {
@@ -151,6 +171,11 @@ func testBreakout(untarFn string, tmpdir string, headers []*tar.Header) error {
 		}
 		if err != nil {
 			// skip file if error
+			return nil
+		}
+		// Skip symlinks: their targets may point outside the root, but that
+		// is safe under the extraction root's access model.
+		if info.Type()&os.ModeSymlink != 0 {
 			return nil
 		}
 		b, err := os.ReadFile(path)

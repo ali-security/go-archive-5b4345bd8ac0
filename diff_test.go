@@ -195,6 +195,24 @@ func TestApplyLayerInvalidSymlink(t *testing.T) {
 	}
 }
 
+// TestApplyLayerInvalidWhiteout verifies that a whiteout entry naming ".."
+// (".wh...") cannot be used to remove the parent of the extraction root.
+func TestApplyLayerInvalidWhiteout(t *testing.T) {
+	for i, headers := range [][]*tar.Header{
+		{ // try removing the parent of dest, including the victim folder
+			{
+				Name:     ".wh...",
+				Typeflag: tar.TypeReg,
+				Mode:     0o644,
+			},
+		},
+	} {
+		if err := testBreakout("applylayer", "docker-TestApplyLayerInvalidWhiteout", headers); err != nil {
+			t.Fatalf("i=%d. %v", i, err)
+		}
+	}
+}
+
 func TestApplyLayerWhiteouts(t *testing.T) {
 	wd, err := os.MkdirTemp("", "graphdriver-test-whiteouts")
 	if err != nil {

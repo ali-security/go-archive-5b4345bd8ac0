@@ -28,12 +28,18 @@ func timeToTimespec(time time.Time) unix.Timespec {
 	return unix.NsecToTimespec(time.UnixNano())
 }
 
-func lchtimes(name string, atime time.Time, mtime time.Time) error {
+// lchtimes changes the access and modified time of the named file within
+// root, without following a symlink in the final path component.
+func lchtimes(root *extractRoot, name string, atime time.Time, mtime time.Time) error {
+	p, err := root.resolve("lchtimes", name, false)
+	if err != nil {
+		return err
+	}
 	utimes := [2]unix.Timespec{
 		timeToTimespec(atime),
 		timeToTimespec(mtime),
 	}
-	err := unix.UtimesNanoAt(unix.AT_FDCWD, name, utimes[0:], unix.AT_SYMLINK_NOFOLLOW)
+	err = unix.UtimesNanoAt(unix.AT_FDCWD, p, utimes[0:], unix.AT_SYMLINK_NOFOLLOW)
 	if err != nil && err != unix.ENOSYS {
 		return err
 	}

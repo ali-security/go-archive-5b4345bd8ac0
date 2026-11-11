@@ -68,7 +68,7 @@ func (overlayWhiteoutConverter) ConvertWrite(hdr *tar.Header, path string, fi os
 	}, nil
 }
 
-func (c overlayWhiteoutConverter) ConvertRead(hdr *tar.Header, path string) (bool, error) {
+func (c overlayWhiteoutConverter) ConvertRead(root *extractRoot, hdr *tar.Header, path string) (bool, error) {
 	base := filepath.Base(path)
 	dir := filepath.Dir(path)
 
@@ -79,7 +79,12 @@ func (c overlayWhiteoutConverter) ConvertRead(hdr *tar.Header, path string) (boo
 			opaqueXattrName = "user.overlay.opaque"
 		}
 
-		err := unix.Setxattr(dir, opaqueXattrName, []byte{'y'}, 0)
+		// Resolve the directory within root before setting the xattr on it.
+		dirPath, err := root.resolve("setxattr", dir, true)
+		if err != nil {
+			return false, err
+		}
+		err = unix.Setxattr(dirPath, opaqueXattrName, []byte{'y'}, 0)
 		if err != nil {
 			return false, fmt.Errorf("setxattr('%s', %s=y): %w", dir, opaqueXattrName, err)
 		}
@@ -92,10 +97,16 @@ func (c overlayWhiteoutConverter) ConvertRead(hdr *tar.Header, path string) (boo
 		originalBase := base[len(WhiteoutPrefix):]
 		originalPath := filepath.Join(dir, originalBase)
 
-		if err := unix.Mknod(originalPath, unix.S_IFCHR, 0); err != nil {
+		// Resolve the path within root; the whiteout device is created, and
+		// its ownership changed, without following a symlink at originalPath.
+		hostPath, err := root.resolve("mknod", originalPath, false)
+		if err != nil {
+			return false, err
+		}
+		if err := unix.Mknod(hostPath, unix.S_IFCHR, 0); err != nil {
 			return false, fmt.Errorf("failed to mknod('%s', S_IFCHR, 0): %w", originalPath, err)
 		}
-		if err := os.Chown(originalPath, hdr.Uid, hdr.Gid); err != nil {
+		if err := os.Lchown(hostPath, hdr.Uid, hdr.Gid); err != nil {
 			return false, err
 		}
 

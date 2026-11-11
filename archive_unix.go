@@ -56,7 +56,7 @@ func getFileUIDGID(stat interface{}) (int, int, error) {
 //
 // Creating device nodes is not supported when running in a user namespace,
 // produces a [syscall.EPERM] in most cases.
-func handleTarTypeBlockCharFifo(hdr *tar.Header, path string) error {
+func handleTarTypeBlockCharFifo(root *extractRoot, hdr *tar.Header, dstPath string) error {
 	mode := uint32(hdr.Mode & 0o7777)
 	switch hdr.Typeflag {
 	case tar.TypeBlock:
@@ -67,20 +67,33 @@ func handleTarTypeBlockCharFifo(hdr *tar.Header, path string) error {
 		mode |= unix.S_IFIFO
 	}
 
-	return mknod(path, mode, unix.Mkdev(uint32(hdr.Devmajor), uint32(hdr.Devminor)))
+	// Resolve the path within root; the node itself is created without
+	// following a symlink in the final path component.
+	p, err := root.resolve("mknod", dstPath, false)
+	if err != nil {
+		return err
+	}
+	return mknod(p, mode, unix.Mkdev(uint32(hdr.Devmajor), uint32(hdr.Devminor)))
 }
 
-func handleLChmod(hdr *tar.Header, path string, hdrInfo os.FileInfo) error {
-	if hdr.Typeflag == tar.TypeLink {
-		if fi, err := os.Lstat(hdr.Linkname); err == nil && (fi.Mode()&os.ModeSymlink == 0) {
-			if err := os.Chmod(path, hdrInfo.Mode()); err != nil {
-				return err
-			}
+// handleLChmod applies the mode from hdrInfo to dstPath within root, skipping
+// symlinks (there is no lchmod). For hardlinks, the mode is applied only when
+// the link target (hardlinkTarget) is itself not a symlink.
+func handleLChmod(root *extractRoot, dstPath string, hardlinkTarget string, hdr *tar.Header, hdrInfo os.FileInfo) error {
+	switch hdr.Typeflag {
+	case tar.TypeSymlink:
+		return nil
+
+	case tar.TypeLink:
+		// If the target is a symlink, there is no way to chmod the hardlink
+		// without following it.
+		fi, err := root.Lstat(hardlinkTarget)
+		if err != nil || fi.Mode()&os.ModeSymlink != 0 {
+			return nil
 		}
-	} else if hdr.Typeflag != tar.TypeSymlink {
-		if err := os.Chmod(path, hdrInfo.Mode()); err != nil {
-			return err
-		}
+		return root.Chmod(dstPath, hdrInfo.Mode())
+
+	default:
+		return root.Chmod(dstPath, hdrInfo.Mode())
 	}
-	return nil
 }
